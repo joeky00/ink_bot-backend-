@@ -1,4 +1,6 @@
 fastapi
 uvicorn
+transformers
+gradio
 requests
-python-multipart
+python-dotenv
