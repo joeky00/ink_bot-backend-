@@ -1,85 +1,89 @@
-import os
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import google.generativeai as genai
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+import requests
+import re
 
-# Initialize Flask app
-app = Flask(__name__)
-CORS(app, origins=["*"])
+# ====== Initialize FastAPI ======
+app = FastAPI()
 
-# Configure Gemini API
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-genai.configure(api_key=GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash-preview-0409')
+# Allow CORS for your frontend (you can restrict domains here)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Replace with your frontend domain in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def query_gemini(prompt: str) -> str:
-    try:
-        print(f"Querying Gemini with: {prompt}")
-        response = gemini_model.generate_content(prompt)
-        print(f"Response Text: {response.text}")
-        return response.text.strip()
-    except Exception as e:
-        print(f"An unexpected error occurred: {str(e)}")
-        return f"An unexpected error occurred: {str(e)}"
+# ====== Load Model ======
+model_name = "google/flan-t5-small"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+qa_pipeline = pipeline("question-answering", model=model, tokenizer=tokenizer)
 
-@app.route('/api/chat', methods=['POST'])
-def chat_api():
-    try:
-        data = request.get_json()
-        
-        if not data or 'message' not in data:
-            return jsonify({'error': 'Message is required'}), 400
-        
-        message = data['message']
-        history = data.get('history', [])
-        
-        # Build context from history for better responses
-        if history and len(history) > 0:
-            # Take last 6 messages for context (3 exchanges)
-            recent_history = history[-6:] if len(history) > 6 else history
-            context_parts = []
-            for msg in recent_history:
-                role = "Human" if msg['role'] == 'user' else "Assistant"
-                context_parts.append(f"{role}: {msg['content']}")
-            
-            context = "\n".join(context_parts)
-            full_prompt = f"Previous conversation context:\n{context}\n\nHuman: {message}\n\nAssistant:"
-        else:
-            full_prompt = f"Human: {message}\n\nAssistant:"
-        
-        # Get response from Gemini
-        response = query_gemini(full_prompt)
-        
-        return jsonify({
-            'response': response,
-            'status': 'success'
-        })
-        
-    except Exception as e:
-        print(f"API Error: {str(e)}")
-        return jsonify({
-            'error': f'An error occurred: {str(e)}',
-            'status': 'error'
-        }), 500
+# ====== Load Context (from FIFA player dataset QA) ======
+with open("qa_context.txt", "r") as file:
+    context = file.read()
 
-@app.route('/api/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        'status': 'healthy', 
-        'message': 'INK Bot API is running',
-        'model': 'gemini-1.5-flash-preview-0409'
-    })
+# ====== API KEYS ======
+NEWS_API_KEY = "b311a02382fa4a88b9d1b4bfc74bb051"
+FOOTBALL_API_KEY = "5e8310b5845626994bcbf672a6ff5b60"
 
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        'message': 'INK Bot API is running!',
-        'endpoints': {
-            'health': '/api/health',
-            'chat': '/api/chat (POST)'
-        }
-    })
+# ====== Helper Functions ======
+def get_transfer_news():
+    url = f"https://newsapi.org/v2/everything?q=football transfers&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
+    response = requests.get(url)
+    data = response.json()
+    if data.get("articles"):
+        article = data["articles"][0]
+        return f"📰 Latest Transfer: \"{article['title']}\" (Source: {article['source']['name']})"
+    return "⚠️ No transfer news available."
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+def get_next_match():
+    headers = {
+        "x-rapidapi-host": "v3.football.api-sports.io",
+        "x-apisports-key": FOOTBALL_API_KEY,
+    }
+    url = "https://v3.football.api-sports.io/fixtures?league=39&season=2024&next=1"
+    response = requests.get(url, headers=headers)
+    data = response.json()
+    if data.get("response"):
+        match = data["response"][0]["teams"]
+        return f"⚽ Next Match: {match['home']['name']} vs {match['away']['name']}"
+    return "⚠️ No upcoming matches found."
+
+def sports_ai_response(user_input: str) -> str:
+    user_input = user_input.lower()
+
+    # If it's a QA-type query
+    if any(k in user_input for k in ["who", "what", "how", "when", "is", "was"]):
+        try:
+            result = qa_pipeline(question=user_input, context=context)
+            return f"🤖 Answer: {result['answer']}"
+        except:
+            return "⚠️ Sorry, I couldn't find an answer. Please rephrase your question."
+
+    # If it's about transfers
+    if "transfer" in user_input or "signed" in user_input:
+        return get_transfer_news()
+
+    # If it's about matches
+    if any(k in user_input for k in ["next match", "upcoming match", "who is playing", "next premier league game"]):
+        return get_next_match()
+
+    # Fallback
+    return "⚽ I'm still learning. Try asking about a football player, transfer, or upcoming match!"
+
+# ====== Request Model ======
+class ChatRequest(BaseModel):
+    message: str
+
+# ====== API Route ======
+@app.post("/chat")
+async def chat_endpoint(request: ChatRequest):
+    user_message = request.message
+    bot_reply = sports_ai_response(user_message)
+    return {"response": bot_reply}
+    
