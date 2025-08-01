@@ -3,8 +3,9 @@ services:
     name: ink-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PORT
-        value: 10000
-        
+      - key: NEWS_API_KEY
+        sync: false
+      - key: FOOTBALL_API_KEY  
+        sync: false   
